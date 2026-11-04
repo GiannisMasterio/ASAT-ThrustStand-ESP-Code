@@ -354,9 +354,9 @@ void setup() {
     unsigned long start = millis();
     
     Serial.println("Initializing Load Cells...");
-    thrust_cell.initialize();
-    torque_cell1.initialize();
-    torque_cell2.initialize();
+    thrust_cell.initialize(THRUST_CALIBRATION_FACTOR);
+    torque_cell1.initialize(TORQUE_CALIBRATION_FACTOR);
+    torque_cell2.initialize(TORQUE_CALIBRATION_FACTOR);
     
     client.setCallback(callback);
     last_read_time = millis();
@@ -367,9 +367,9 @@ void loop() {
     if (!client.connected()) reconnect(); 
     client.loop();
 
-    thrust_cell.poll();
-    torque_cell1.poll();
-    torque_cell2.poll();
+    thrust_cell.gather_values();
+    torque_cell1.gather_values();
+    torque_cell2.gather_values();
 
     unsigned long now = millis(); // new rpm
 
