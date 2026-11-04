@@ -40,15 +40,6 @@ const char* MQTT_TOPIC_PUB = "thrust-fromesp";
 #define ESC_TIMER     LEDC_TIMER_0
 #define ESC_SPEEDMODE LEDC_LOW_SPEED_MODE
 
-// ------------------ Class Objects Creations ------------------
-
-WiFiClient espClient;
-PubSubClient client(espClient);
-
-HX711_ADC thrust_scale(PIN_DOUT_F1, PIN_SCK);
-HX711_ADC torque_scale1(PIN_DOUT_T1, PIN_SCK);
-HX711_ADC torque_scale2(PIN_DOUT_T2, PIN_SCK);
-
 // ------------------ Scaling & constants ------------------
 
 const float INA228_VBUS_LSB   = 0.0001953125f;
@@ -58,10 +49,6 @@ const float CURRENT_LSB_USER  = 0.00003688f; //0.00004465f
 float ZERO_OFFSET = 38468.909;     // The raw value when vertical & empty
 float THRUST_CALIBRATION_FACTOR = 0.4485; // The "steps per gram"
 float gravity = 9.81;
-
-const float CAL_FACTOR = 220.0f;
-const int SAMPLE_SIZE = 5;
-const float TICKS_PER_US = 65536.0 / 20000.0;
 
 bool use_lowpass_filter = false;
 float percentage_old_measurement = 0.8f;
@@ -75,12 +62,56 @@ const int POLE_PAIRS = 7;
 volatile unsigned long last_pulse_us = 0;
 volatile unsigned long pulse_period_us = 0;
 
+volatile unsigned long pulse_count = 0;
+unsigned long last_read_time = 0;
+unsigned long lastPublishTime = 0;
+
+
+float current_throttle = MIN_THROTTLE;
+bool escArmed = false;
+float stand_offset = 37500;
+float DIVIDER = 5.0505;
+
+const int wait_for_network_ms = 6000; // perimenoyme 6 seconds gia neo connection 
+
+struct LoadCell {
+
+    uint8_t dout_pin; // HX711 DOUT PIN
+    HX711_ADC hx711;  // Every loadcell corresponds to an HX711 element
+    float calibration_factor = 1.0f; 
+    float weight = 0.0f; 
+    long raw_value = 0;
+    bool initialized = false;
+    bool is_ok = false;
+    // Constructor
+    LoadCell(uint8_t dout,float calibration_factor): dout_pin(dout), this->calibration_factor(calibration_factor){}
+    // Initialize HX711
+    void initialize() {
+        hx711.begin(dout_pin, PIN_SCK);
+        hx711.set_scale(calibration_factor);
+        hx711.tare();
+        initialized = true;
+    }
+    // Read measurements
+    void update() {
+        if (!initialized || !hx711.is_ready()) return;
+        raw_value = hx711.read();
+        weight = hx711.get_units(1);
+    }
+    // Tare
+    void tare() {
+        if (!initialized) return;
+        hx711.tare(); // μηδενισμος
+        weight = 0.0f;
+    }
+    // Update calibration
+    void setCalibration(float calibration) {
+        calibration_factor = calibration;
+        hx711.set_scale(calibration_factor);
+    }
+};
+
 // Interrupt Service Routine: captures microseconds between pulses
-void IRAM_ATTR onRpmPulse() {
-    unsigned long now_us = micros();
-    pulse_period_us = now_us - last_pulse_us;
-    last_pulse_us = now_us;
-}
 
 struct Telemetry {
   float newton = 0.0f;  // LOAD CELL ΔΥΝΑΜΗΣ
@@ -88,24 +119,24 @@ struct Telemetry {
   float current = 0.0f;
   float voltage = 0.0f;
   float torque = 0.0f; // ΑΠΟ ΣΥΝΔΥΑΣΜΟ LOAD CELLS TORQUE
+  float throttle = 0.0f;
 };
 
-volatile unsigned long pulse_count = 0;
-unsigned long last_read_time = 0;
-unsigned long lastPublishTime = 0;
+// ------------------ Class Objects Creations ------------------
 
-float loadcellAccum = 0.0f;
-uint8_t loadcellCount = 0;
+WiFiClient espClient;
+PubSubClient client(espClient);
 
-float current_throttle = MIN_THROTTLE;
-bool escArmed = false;
-bool scale_is_ok = false;
-float stand_offset = 37500;
-float DIVIDER = 5.0505;
-
-int wait_for_network_ms = 6000; // perimenoyme 6 seconds gia neo connection 
-
+LoadCell thrust_cell = LoadCell(PIN_DOUT_F1, THRUST_CALIBRATION_FACTOR);
+LoadCell torque_cell1 = LoadCell(PIN_DOUT_T1, TORQUE_CALIBRATION_FACTOR);
+LoadCell torque_cell2 = LoadCell(PIN_DOUT_T2, TORQUE_CALIBRATION_FACTOR);
 Telemetry telem; // σε αυτο το instance θα κρατιουνται ολες οι τιμες της τηλεμετριας
+
+void IRAM_ATTR onRpmPulse() {
+    unsigned long now_us = micros();
+    pulse_period_us = now_us - last_pulse_us;
+    last_pulse_us = now_us;
+}
 
 void connectToWiFiandMQTT() {
 
@@ -194,12 +225,18 @@ void setMotorPWM(float microseconds) {
     ledc_update_duty(ESC_SPEEDMODE, ESC_CHANNEL);
 }
 
+void esc_initialize(){
+    setMotorPWM(MIN_THROTTLE);
+    delay(3000);
+    escArmed = true;
+}
+
 // ------------------ MQTT ------------------
 
 const char* buildPayload(Telemetry* telem, float current_throttle) {
 
     static char packet[120];
-    snprintf(packet, sizeof(packet),"Thrust:%.2f,Current:%.4f,Voltage:%.2f,Throttle:%.0f,RPM:%.0f,Torque:%.2f", telem->newton, telem->current, telem->voltage, current_throttle, telem->rpm, telem->torque);
+    snprintf(packet, sizeof(packet),"Thrust:%.2f,Current:%.4f,Voltage:%.2f,Throttle:%.0f,RPM:%.0f,Torque:%.2f", telem->newton, telem->current, telem->voltage, telem->throttle, telem->rpm, telem->torque);
     return packet;
 }
 
@@ -248,11 +285,34 @@ void reconnect() {
 
 }
 
-void esc_initialize(){
-    setMotorPWM(MIN_THROTTLE);
-    delay(3000);
-    escArmed = true;
+// ----------------- LOAD CELLS ---------------
+
+void updateThrust() {
+
+    thrust_cell.update();
+
+    /*
+    if (loadcellCount<=0) return;
+
+    float raw_average = loadcellAccum / loadcellCount;
+    float grams = - (raw_average - ZERO_OFFSET) / THRUST_CALIBRATION_FACTOR;
+    telem.newton = (grams / 1000.0) * gravity;
+    loadcellAccum = 0.0f;
+    loadcellCount = 0; */
 }
+
+void updateTorque() {
+
+    torque_cell.update();
+    /*
+    if (loadcellCount<=0) return;
+    // ΑΚΟΜΗ ΔΕ ΞΕΡΟΥΜΕ ΠΩΣ ΕΧΕΙ ΟΤΙ ΝΑΝΑΙ
+    telem.torque = (grams / 1000.0) * gravity;
+    loadcellAccum = 0.0f;
+    loadcellCount = 0; */
+} 
+
+// --------------------------------------------
 
 void setup() {
 
@@ -311,24 +371,6 @@ void setup() {
 
 }
 
-void updateThrust() {
-    if (loadcellCount<=0) return;
-
-    float raw_average = loadcellAccum / loadcellCount;
-    float grams = - (raw_average - ZERO_OFFSET) / THRUST_CALIBRATION_FACTOR;
-    telem.newton = (grams / 1000.0) * gravity;
-    loadcellAccum = 0.0f;
-    loadcellCount = 0;
-}
-
-void updateTorque() {
-    if (loadcellCount<=0) return;
-    // ΑΚΟΜΗ ΔΕ ΞΕΡΟΥΜΕ ΠΩΣ ΕΧΕΙ ΟΤΙ ΝΑΝΑΙ
-    telem.torque = (grams / 1000.0) * gravity;
-    loadcellAccum = 0.0f;
-    loadcellCount = 0;
-}
-
 void loop() {
 
     if (!client.connected()) reconnect(); 
@@ -340,7 +382,7 @@ void loop() {
         loadcellCount++;
     }
 
-    unsigned long now = millis(); //new rpm
+    unsigned long now = millis(); // new rpm
 
     if (now - lastPublishTime >= PUBLISH_INTERVAL_MS) {
         lastPublishTime = now; // remember to advance publish timer
@@ -354,7 +396,6 @@ void loop() {
         // 2. Check if motor stopped (no pulse in the last 200ms)
         float current_rpm = 0.0f;
         if (micros() - last_pulse < 200000UL && period_us > 0) {
-            
             current_rpm = 60000000.0f / ((float)period_us * POLE_PAIRS); // (60 sec * 1,000,000 us) / (period * pole_pairs)
         }
 
@@ -362,11 +403,10 @@ void loop() {
         if (use_lowpass_filter) {
             telem.rpm = (telem.rpm * percentage_old_measurement) + 
                         (current_rpm * (1.0f - percentage_old_measurement));
-        } else {
-            telem.rpm = current_rpm;
-        }
-
+        } else telem.rpm = current_rpm;
+           
         updateThrust();
+        updateTorque();
         updateVoltageAndCurrent();
 
         const char* payload = buildPayload(&telem, current_throttle);
