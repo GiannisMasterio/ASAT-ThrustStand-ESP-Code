@@ -66,13 +66,10 @@ volatile unsigned long pulse_count = 0;
 unsigned long last_read_time = 0;
 unsigned long lastPublishTime = 0;
 
-
 float current_throttle = MIN_THROTTLE;
 bool escArmed = false;
-float stand_offset = 37500;
-float DIVIDER = 5.0505;
 
-const int wait_for_network_ms = 6000; // perimenoyme 6 seconds gia neo connection 
+const int wait_for_network_ms = 5000; // perimenoyme 6 seconds gia neo connection 
 
 struct LoadCell {
 
@@ -80,34 +77,29 @@ struct LoadCell {
     HX711_ADC hx711;  // Every loadcell corresponds to an HX711 element
     float calibration_factor = 1.0f; 
     float weight = 0.0f; 
+    static const int gain = 128; // kathorizei to sensitivity kathws enisxyei th metrhsh
     long raw_value = 0;
     bool initialized = false;
     bool is_ok = false;
+
+    float loadcellCount = 0;
+    float loadcellAccum = 0;
     // Constructor
     LoadCell(uint8_t dout,float calibration_factor): dout_pin(dout), this->calibration_factor(calibration_factor){}
     // Initialize HX711
     void initialize() {
-        hx711.begin(dout_pin, PIN_SCK);
-        hx711.set_scale(calibration_factor);
+        hx711.begin(gain);
+        hx711.setCalFactor(calibration_factor);
         hx711.tare();
         initialized = true;
     }
     // Read measurements
-    void update() {
-        if (!initialized || !hx711.is_ready()) return;
+    float update() {
+        if (!initialized || !hx711.is_ready()) return 0;
         raw_value = hx711.read();
         weight = hx711.get_units(1);
-    }
-    // Tare
-    void tare() {
-        if (!initialized) return;
-        hx711.tare(); // μηδενισμος
-        weight = 0.0f;
-    }
-    // Update calibration
-    void setCalibration(float calibration) {
-        calibration_factor = calibration;
-        hx711.set_scale(calibration_factor);
+
+        return weight; 
     }
 };
 
@@ -289,7 +281,7 @@ void reconnect() {
 
 void updateThrust() {
 
-    thrust_cell.update();
+    float raw_average = thrust_cell.update();
 
     /*
     if (loadcellCount<=0) return;
@@ -302,14 +294,18 @@ void updateThrust() {
 }
 
 void updateTorque() {
-
-    torque_cell.update();
+    if (torque_cell1.loadcellCount || torque_cell2.loadcellCount <=0) return;
+    
+    float raw_average1 = torque_cell1.update();
+    float raw_average2 = torque_cell2.update();
     /*
     if (loadcellCount<=0) return;
     // ΑΚΟΜΗ ΔΕ ΞΕΡΟΥΜΕ ΠΩΣ ΕΧΕΙ ΟΤΙ ΝΑΝΑΙ
     telem.torque = (grams / 1000.0) * gravity;
     loadcellAccum = 0.0f;
     loadcellCount = 0; */
+
+
 } 
 
 // --------------------------------------------
@@ -336,7 +332,6 @@ void setup() {
         .freq_hz          = 50,
         .clk_cfg          = LEDC_AUTO_CLK
     };
-
     ledc_timer_config(&timerConfig);
     ledc_channel_config_t channelConfig = {
 
@@ -352,9 +347,10 @@ void setup() {
     ledc_channel_config(&channelConfig);
 
     esc_initialize();
-
     connectToWiFiandMQTT();
-
+    unsigned long start = millis();
+    
+/*
     scale.begin();
     unsigned long start = millis();
     while (!scale.update() && millis() - start < 3000) delay(5);
@@ -364,8 +360,12 @@ void setup() {
         scale_is_ok = true;
         scale.setCalFactor(CAL_FACTOR);
 
-    } else scale_is_ok = false;
+    } else scale_is_ok = false; */
 
+    thrust_cell.initialize();
+    torque_cell1.initialize();
+    torque_cell2.initialize();
+    
     client.setCallback(callback);
     last_read_time = millis();
 
