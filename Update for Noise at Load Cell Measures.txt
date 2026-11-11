@@ -1,0 +1,16 @@
+if (scales.is_ready()) {
+        long raw_values[3];
+        
+        noInterrupts();             // Σταματάει προσωρινά Wi-Fi & RPM
+        scales.readRaw(raw_values); // Διαβάζει τα Load Cells με τέλειο χρονισμό
+        interrupts();               // Τα ξανανοίγει αμέσως
+        
+        telem.newton = (float)raw_values[0];                                
+        telem.torque = ((float)raw_values[1] + (float)raw_values[2]) / 2.0f; 
+    }
+
+Αν δεις ότι το Wi-Fi ή τα Load Cells κάνουν νούμερα μετά από αυτό (γιατί το noInterrupts παγώνει το σύστημα για κάποια micro-seconds), η εναλλακτική είναι να φτιάξουμε ένα πανεύκολο φίλτρο αποκοπής θορύβου (Median Filter) στο PC (μέσα στο Qt), ώστε το ESP32 να στέλνει τα RAW του γρήγορα, και το PC να κόβει τα "τρελά" spikes πριν τα εμφανίσει στο UI!
+
+δηλαδή αυτή η αλλαγει απαιτει ελεγχο να δουμε ότι ειμαστε ενταξει στο wifi
+
+αυτό μπορει να λυθει με φιλτρο στο QT ( median filter όπως ειχα στα rpm)
